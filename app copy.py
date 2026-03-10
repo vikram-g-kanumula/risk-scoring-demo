@@ -2416,154 +2416,37 @@ with TABS[3]:
     with r1c2:
         st.markdown(f"<div style='font-size:.84rem;font-weight:600;"
                     f"color:{TIER_COLORS['tier3']};margin-bottom:6px'>"
-                    "⚡ Interaction Risk by State — Where Compound Risk Concentrates</div>",
+                    "⚡ Average M̂ by State — Where Interaction Risk Concentrates</div>",
                     unsafe_allow_html=True)
-
-        # ── Aggregate state-level metrics for choropleth ──
-        m_by_state = (data.groupby("state")
-                          .agg(mean_m=("M_true","mean"),
-                               policies=("policy_id","count"),
-                               total_prem=("indicated_premium","sum"),
-                               total_el=("expected_loss_true","sum"))
+        m_by_state = (data.groupby("state")["M_true"]
+                          .agg(["mean","count"])
+                          .sort_values("mean", ascending=False)
                           .reset_index())
-        # Identify top peril driver per state (highest % of High-zone policies)
-        _peril_map = {"wildfire_zone": "Wildfire", "flood_zone": "Flood",
-                      "earthquake_zone": "Earthquake", "hail_zone": "Hail"}
-        _top_perils = []
-        for st_code in m_by_state["state"]:
-            st_slice = data[data["state"] == st_code]
-            pcts = {lbl: (st_slice[col] == "High").mean()
-                    for col, lbl in _peril_map.items()}
-            _top_perils.append(max(pcts, key=pcts.get))
-        m_by_state["top_peril"] = _top_perils
-
-        m_by_state["hover"] = m_by_state.apply(
-            lambda r: (f"<b>{r.state}</b><br>"
-                       f"Mean M̂: ×{r.mean_m:.2f}<br>"
-                       f"Policies: {r.policies:,}<br>"
-                       f"Premium: ${r.total_prem/1e6:.1f}M<br>"
-                       f"Exp Loss: ${r.total_el/1e6:.1f}M<br>"
-                       f"Top Peril: {r.top_peril}"), axis=1)
-
-        fig_choro = go.Figure(go.Choropleth(
-            locations=m_by_state["state"],
-            z=m_by_state["mean_m"],
-            locationmode="USA-states",
-            colorscale=[[0,"#FEF3C7"],[0.35,"#F59E0B"],
-                        [0.65,"#D97706"],[1.0,"#92400E"]],
-            zmin=m_by_state["mean_m"].min() - 0.05,
-            zmax=m_by_state["mean_m"].max() + 0.05,
-            marker_line_color="#FFFFFF",
-            marker_line_width=1.5,
-            colorbar=dict(title=dict(text="Mean M̂", font=dict(size=11)),
-                          thickness=12, len=0.6, tickfont=dict(size=9)),
-            text=m_by_state["hover"],
-            hovertemplate="%{text}<extra></extra>",
+        bar_cols = [TIER_COLORS["tier3"] if m > 1.8 else
+                    "#b89030" if m > 1.4 else "#1D4ED8"
+                    for m in m_by_state["mean"]]
+        fig_state = go.Figure(go.Bar(
+            x=m_by_state["state"],
+            y=m_by_state["mean"],
+            marker_color=bar_cols,
+            text=[f"×{v:.2f}" for v in m_by_state["mean"]],
+            textposition="outside",
         ))
-        fig_choro.update_layout(
-            height=290,
-            **{k: v for k, v in _layout.items() if k != "margin"},
-            geo=dict(
-                scope="usa",
-                bgcolor="#FAFBFD",
-                lakecolor="#FAFBFD",
-                landcolor="#F1F5F9",
-                showlakes=False,
-                projection_type="albers usa",
-            ),
-            margin=dict(l=0, r=0, t=10, b=0),
+        fig_state.add_hline(y=1.0, line_dash="dash", line_color="#6B7280",
+                            annotation_text="Baseline (no interaction)",
+                            annotation_font_color="#6B7280", annotation_font_size=10)
+        fig_state.update_layout(
+            height=290, **_layout,
+            yaxis=dict(title="Mean M̂", gridcolor=GRID_COL, range=[0.8, m_by_state["mean"].max()*1.2]),
+            xaxis=dict(showgrid=False),
         )
-        st.plotly_chart(fig_choro, use_container_width=True)
-        ca_m = m_by_state.loc[m_by_state["state"]=="CA","mean_m"].values
-        top_st = m_by_state.sort_values("mean_m", ascending=False).iloc[0]
+        st.plotly_chart(fig_state, use_container_width=True)
+        ca_m = m_by_state.loc[m_by_state["state"]=="CA","mean"].values
         if len(ca_m):
             st.markdown(f"<div style='font-size:.76rem;color:#6B7280;'>"
-                        f"CA dominates at ×{ca_m[0]:.2f} (Wood Shake × High Wildfire). "
-                        f"FL elevated by flood × coastal surge. "
-                        f"Gray states outside 10-state model universe.</div>",
+                        f"CA dominates with mean M̂ ×{ca_m[0]:.2f} — driven by Wood Shake × High Wildfire. "
+                        f"FL second (flood × coastal surge). CO/NV elevated by seismic + WUI zones.</div>",
                         unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ── Row 1b: State × Peril Interaction Heatmap ────────────────────────────
-    st.markdown(f"<div style='font-size:.84rem;font-weight:600;"
-                f"color:{TIER_COLORS['tier3']};margin-bottom:2px'>"
-                "🔥 State × Peril Interaction Heatmap — Where Compound Risk Clusters</div>",
-                unsafe_allow_html=True)
-    st.markdown("<div style='font-size:.76rem;color:#6B7280;margin-bottom:10px'>"
-                "Mean M&#x0302; at the intersection of state and high-peril zone. "
-                "Darker cells = stronger interaction compounding. "
-                "Blank cells indicate &lt;20 policies (insufficient credibility).</div>",
-                unsafe_allow_html=True)
-
-    _peril_zones = {"wildfire_zone": "Wildfire", "flood_zone": "Flood",
-                    "earthquake_zone": "Earthquake", "hail_zone": "Hail"}
-    _hm_rows = []
-    for st_code in sorted(data["state"].unique()):
-        st_slice = data[data["state"] == st_code]
-        for col, lbl in _peril_zones.items():
-            sub = st_slice[st_slice[col] == "High"]
-            _hm_rows.append({
-                "State": st_code, "Peril": lbl + " High",
-                "Mean_M": sub["M_true"].mean() if len(sub) >= 20 else np.nan,
-                "Policies": len(sub),
-            })
-    hm_df = pd.DataFrame(_hm_rows)
-    hm_pivot = hm_df.pivot(index="State", columns="Peril", values="Mean_M")
-    hm_count = hm_df.pivot(index="State", columns="Peril", values="Policies")
-
-    # Sort states by row-max M̂ descending for visual impact
-    _row_max = hm_pivot.max(axis=1).sort_values(ascending=True)
-    hm_pivot = hm_pivot.reindex(_row_max.index)
-    hm_count = hm_count.reindex(_row_max.index)
-
-    # Annotation text: "×1.77\n(n=3,490)"
-    annot_text = []
-    for idx in hm_pivot.index:
-        row_txt = []
-        for col in hm_pivot.columns:
-            v = hm_pivot.loc[idx, col]
-            n = int(hm_count.loc[idx, col]) if pd.notna(hm_count.loc[idx, col]) else 0
-            if pd.isna(v):
-                row_txt.append("—")
-            else:
-                row_txt.append(f"×{v:.2f}\n({n:,})")
-        annot_text.append(row_txt)
-
-    fig_hm = go.Figure(go.Heatmap(
-        z=hm_pivot.values,
-        x=hm_pivot.columns.tolist(),
-        y=hm_pivot.index.tolist(),
-        colorscale=[[0,"#FEF3C7"],[0.3,"#FBBF24"],[0.6,"#D97706"],[1.0,"#7C2D12"]],
-        zmin=1.8, zmax=hm_pivot.max().max() + 0.15,
-        text=annot_text,
-        texttemplate="%{text}",
-        textfont=dict(size=10),
-        hovertemplate="<b>%{y} × %{x}</b><br>Mean M̂: %{z:.2f}<extra></extra>",
-        colorbar=dict(title=dict(text="Mean M̂", font=dict(size=10)),
-                      thickness=10, len=0.8, tickfont=dict(size=9)),
-        xgap=3, ygap=3,
-    ))
-    fig_hm.update_layout(
-        height=300,
-        **{k: v for k, v in _layout.items() if k != "margin"},
-        margin=dict(l=10, r=10, t=10, b=10),
-        xaxis=dict(showgrid=False, tickfont=dict(size=10), side="bottom"),
-        yaxis=dict(showgrid=False, tickfont=dict(size=10), autorange="reversed"),
-    )
-    st.plotly_chart(fig_hm, use_container_width=True)
-
-    # Dynamic insight caption
-    _hm_flat = hm_df.dropna(subset=["Mean_M"]).sort_values("Mean_M", ascending=False)
-    if len(_hm_flat):
-        top = _hm_flat.iloc[0]
-        st.markdown(
-            f"<div style='font-size:.76rem;color:#6B7280;'>"
-            f"Hottest cell: <b>{top.State} × {top.Peril}</b> at ×{top.Mean_M:.2f} "
-            f"({int(top.Policies):,} policies) — the signature compounding interaction. "
-            f"Same peril in a lower-risk state may show ×0.3–0.5 less multiplier, "
-            f"proving geography amplifies peril severity non-linearly.</div>",
-            unsafe_allow_html=True)
 
     st.markdown("---")
 
